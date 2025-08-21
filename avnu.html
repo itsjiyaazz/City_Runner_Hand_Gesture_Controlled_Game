@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>City Runner - Hand Gesture Version</title>
+
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, Arial, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .game-container {
+    position: relative;
+    width: 800px; height: 400px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 3px solid #222;
+    box-shadow: 0 12px 32px rgba(0,0,0,.35);
+    background: linear-gradient(to bottom, #87CEEB 0%, #87CEEB 60%, #696969 60%, #696969 100%);
+  }
+  .game-canvas { width: 100%; height: 100%; display:block; }
+  .ui-overlay {
+    position: absolute; top: 10px; left: 10px; z-index: 10;
+    color: #fff; font-weight: 700; text-shadow: 0 2px 6px rgba(0,0,0,.6);
+  }
+  .game-over {
+    position: absolute; inset: 0; display:none; z-index:20;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,.6); color:#fff; text-align:center;
+  }
+  .game-over .panel {
+    background: rgba(0,0,0,.75); padding:18px 22px; border-radius:12px;
+  }
+  .controls {
+    position: absolute; bottom: 10px; left: 10px; right:10px;
+    color: #fff; font-size: 12px; text-shadow: 0 2px 6px rgba(0,0,0,.6);
+  }
+  button {
+    background:#4CAF50; color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; cursor:pointer; font-size:16px;
+  }
+  button:hover { background:#3f9b44; }
+  /* hidden webcam feed */
+  #webcam { display:none; }
+  .notice {
+    position:absolute; top:10px; right:10px; font-size:12px; color:#fff; opacity:.9;
+  }
+</style>
+
+<!-- Libraries -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.0.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fingerpose@0.1.0/dist/fingerpose.min.js"></script>
+</head>
+<body>
+  <div class="game-container">
+    <canvas id="gameCanvas" class="game-canvas" width="800" height="400"></canvas>
+
+    <div class="ui-overlay">
+      <div>Score: <span id="score">0</span></div>
+      <div>Coins: <span id="coins">0</span></div>
+    </div>
+
+    <div id="gameOver" class="game-over">
+      <div class="panel">
+        <h2>Game Over!</h2>
+        <p>Final Score: <span id="finalScore">0</span></p>
+        <p>Coins Collected: <span id="finalCoins">0</span></p>
+        <button onclick="restartGame()">Play Again</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      SPACE: Jump &nbsp;|&nbsp; Arrow Keys: Switch Lanes &nbsp;|&nbsp; Hand Gestures: 👍 Jump, ✌ or ▶️ swipe → (right), ◀️ swipe ← (left)
+    </div>
+
+    <video id="webcam" autoplay playsinline width="320" height="240"></video>
+    <div id="secureNotice" class="notice"></div>
+  </div>
+
+<script>
+/* ----------------------- GAME CORE ----------------------- */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+let gameRunning = false;
+let gameSpeed = 3;
+let score = 0;
+let coins = 0;
+let frame = 0;
+
+const lanes = [
+  { y: 200, center: 150 }, // top sidewalk
+  { y: 220, center: 250 },
+  { y: 240, center: 350 },
+  { y: 260, center: 450 }  // bottom sidewalk
+];
+
+const player = {
+  x: lanes[1].center - 15, y: lanes[1].y, width: 30, height: 40,
+  velY: 0, grounded: true, color: '#FF6B35',
+  targetLane: 1, currentLane: 1,
+  jump() {
+    if (this.grounded) { this.velY = -15; this.grounded = false; }
+  }
+};
+
+let obstacles = [];
+let powerUps = [];
+let buildings = [];
+let clouds = [];
+const groundY = 300;
+
+function initBackground() {
+  buildings = [];
+  clouds = [];
+  for (let i = 0; i < 10; i++) {
+    buildings.push({
+      x: i * 150 + 200,
+      y: Math.random() * 100 + 80,
+      width: 80 + Math.random() * 40,
+      height: 100 + Math.random() * 80,
+      color: `hsl(${200 + Math.random()*40}, 40%, ${30+Math.random()*20}%)`
+    });
+  }
+  for (let i = 0; i < 5; i++) {
+    clouds.push({
+      x: Math.random() * 800,
+      y: Math.random() * 100 + 20,
+      size: 20 + Math.random() * 15,
+      speed: 0.5 + Math.random() * 0.5
+    });
+  }
+}
+
+function updatePlayer() {
+  player.velY += 0.8; // gravity
+  player.y += player.velY;
+  const targetX = lanes[player.targetLane].center - player.width / 2;
+  if (Math.abs(player.x - targetX) > 3) {
+    player.x += (targetX - player.x) * 0.2;
+  } else {
+    player.x = targetX;
+    player.currentLane = player.targetLane;
+  }
+  const laneY = lanes[player.currentLane].y;
+  if (player.y >= laneY) { player.y = laneY; player.velY = 0; player.grounded = true; }
+}
+
+function spawnObstacle() {
+  if (frame % Math.max(60, 120 - Math.floor(gameSpeed * 5)) !== 0) return;
+  const laneIndex = Math.floor(Math.random() * lanes.length);
+  const r = Math.random();
+  let o;
+  if (r < 0.2) { o = {w:60,h:25,type:'car',color:`hsl(${Math.random()*360},70%,50%)`}; }
+  else if (r < 0.35) { o = {w:80,h:45,type:'bus',color:'#FFD700'}; }
+  else if (r < 0.45) { o = {w:35,h:30,type:'motorcycle',color:'#000080'}; }
+  else if (r < 0.6) { o = {w:20,h:30,type:'trash',color:'#2F4F2F'}; }
+  else if (r < 0.7) { o = {w:18,h:25,type:'hydrant',color:'#DC143C'}; }
+  else if (r < 0.8) { o = {w:15,h:25,type:'cone',color:'#FF6347'}; }
+  else if (r < 0.9) { o = {w:15,h:35,type:'barrier',color:'#FF4500'}; }
+  else { o = {w:40,h:20,type:'bench',color:'#8B4513'}; }
+  obstacles.push({ x: canvas.width, y: lanes[laneIndex].y - o.h, width: o.w, height: o.h, type:o.type, color:o.color, lane: laneIndex });
+}
+
+function spawnPowerUp() {
+  if (frame % 180 !== 0 || Math.random() >= 0.7) return;
+  const laneIndex = Math.floor(Math.random() * lanes.length);
+  const r = Math.random();
+  let t='coin', color='#FFD700', size=15;
+  if (r < 0.6) { t='coin'; color='#FFD700'; size=15; }
+  else if (r < 0.8) { t='speed'; color='#00FF00'; size=20; }
+  else if (r < 0.9) { t='shield'; color='#00BFFF'; size=22; }
+  else { t='magnet'; color='#FF1493'; size=18; }
+  powerUps.push({ x: canvas.width, y: lanes[laneIndex].y - 60, width:size, height:size, type:t, color, collected:false, lane:laneIndex });
+}
+
+function collide(a,b){
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function update() {
+  if (!gameRunning) return;
+  frame++; score += Math.floor(gameSpeed); gameSpeed += 0.003;
+  updatePlayer(); spawnObstacle(); spawnPowerUp();
+
+  obstacles = obstacles.filter(o => {
+    o.x -= gameSpeed;
+    if (collide(player,o)) { gameOver(); return false; }
+    return o.x + o.width > 0;
+  });
+
+  powerUps = powerUps.filter(p => {
+    p.x -= gameSpeed;
+    if (!p.collected && collide(player,p)) {
+      p.collected = true;
+      if (p.type==='coin'){ coins++; score += 10; }
+      else if (p.type==='speed'){ gameSpeed += 1.5; setTimeout(()=> gameSpeed=Math.max(3, gameSpeed-1.5), 3000); }
+      else if (p.type==='shield'){ score += 50; }
+      else if (p.type==='magnet'){ coins += 3; score += 30; }
+      return false;
+    }
+    return p.x + p.width > 0;
+  });
+
+  buildings.forEach(b => {
+    b.x -= gameSpeed * 0.3;
+    if (b.x + b.width < 0){
+      b.x = canvas.width + Math.random()*200;
+      b.y = Math.random()*100 + 80;
+      b.height = 100 + Math.random()*80;
+      b.color = `hsl(${200 + Math.random()*40}, 40%, ${30+Math.random()*20}%)`;
+    }
+  });
+
+  clouds.forEach(c => {
+    c.x -= c.speed;
+    if (c.x + c.size < 0){
+      c.x = canvas.width + Math.random()*100;
+      c.y = Math.random()*100 + 20;
+    }
+  });
+}
+
+function render() {
+  // sky
+  const grad = ctx.createLinearGradient(0,0,0,canvas.height*0.6);
+  grad.addColorStop(0,'#87CEEB'); grad.addColorStop(1,'#B0E0E6');
+  ctx.fillStyle = grad; ctx.fillRect(0,0,canvas.width,canvas.height*0.75);
+  // ground
+  ctx.fillStyle = '#696969'; ctx.fillRect(0, groundY, canvas.width, canvas.height-groundY);
+
+  // lane markings
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([15,15]);
+  for (let i=1;i<lanes.length-1;i++){
+    ctx.beginPath(); ctx.moveTo(0, lanes[i].y+20); ctx.lineTo(canvas.width, lanes[i].y+20); ctx.stroke();
+  }
+  ctx.setLineDash([]); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(0, lanes[0].y + 40); ctx.lineTo(canvas.width, lanes[0].y + 40); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, lanes[lanes.length-1].y + 40); ctx.lineTo(canvas.width, lanes[lanes.length-1].y + 40); ctx.stroke();
+
+  // buildings
+  buildings.forEach(b => {
+    ctx.fillStyle = b.color; ctx.fillRect(b.x, b.y, b.width, b.height);
+    ctx.fillStyle = '#FFFF88';
+    for (let i=0;i<3;i++){ for (let j=0;j<4;j++){
+      if (Math.random() > .3) ctx.fillRect(b.x+10+i*20, b.y+10+j*20, 8,8);
+    }} });
+
+  // clouds
+  clouds.forEach(c => {
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.size, 0, Math.PI*2);
+    ctx.arc(c.x + c.size*.7, c.y, c.size*.8, 0, Math.PI*2);
+    ctx.arc(c.x - c.size*.7, c.y, c.size*.8, 0, Math.PI*2);
+    ctx.fill();
+  });
+
+  // player
+  ctx.fillStyle = player.color; ctx.fillRect(player.x, player.y, player.width, player.height);
+  // head + eyes
+  ctx.fillStyle = '#FFDBAC'; ctx.fillRect(player.x+8, player.y+2, 14, 12);
+  ctx.fillStyle = '#000'; ctx.fillRect(player.x+10, player.y+6, 2,2); ctx.fillRect(player.x+16, player.y+6, 2,2);
+
+  // obstacles
+  obstacles.forEach(o => {
+    ctx.fillStyle = o.color; ctx.fillRect(o.x, o.y, o.width, o.height);
+    if (o.type==='car'){ ctx.fillStyle='#000'; ctx.fillRect(o.x+8,o.y+20,10,5); ctx.fillRect(o.x+42,o.y+20,10,5);
+      ctx.fillStyle='#87CEEB'; ctx.fillRect(o.x+15,o.y+5,30,10); }
+    else if (o.type==='bus'){ ctx.fillStyle='#000'; ctx.fillRect(o.x+10,o.y+38,15,7); ctx.fillRect(o.x+55,o.y+38,15,7);
+      ctx.fillStyle='#87CEEB'; for (let i=0;i<4;i++){ ctx.fillRect(o.x+8+i*16, o.y+8, 12, 15);} }
+    else if (o.type==='hydrant'){ ctx.fillStyle='#800000'; ctx.fillRect(o.x+3,o.y+5,12,5); ctx.fillRect(o.x+3,o.y+15,12,5); }
+    else if (o.type==='motorcycle'){ ctx.fillStyle='#000'; ctx.fillRect(o.x+5,o.y+20,8,8); ctx.fillRect(o.x+22,o.y+20,8,8); }
+    else if (o.type==='cone'){ ctx.fillStyle='#fff'; ctx.fillRect(o.x+3,o.y+8,o.width-6,3); ctx.fillRect(o.x+2,o.y+15,o.width-4,3); }
+  });
+
+  // powerups
+  powerUps.forEach(p => {
+    ctx.fillStyle = p.color;
+    if (p.type==='coin'){
+      ctx.beginPath(); ctx.arc(p.x + p.width/2, p.y + p.height/2, p.width/2, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle='#000'; ctx.font='10px Arial'; ctx.textAlign='center';
+      ctx.fillText('$', p.x+p.width/2, p.y+p.height/2 + 3);
+    } else {
+      ctx.fillRect(p.x, p.y, p.width, p.height);
+      ctx.fillStyle='#fff'; ctx.font='12px Arial'; ctx.textAlign='center';
+      const sym = p.type==='speed'? '>' : p.type==='shield'? 'S' : 'M';
+      ctx.fillText(sym, p.x+p.width/2, p.y+p.height/2 + 4);
+    }
+  });
+
+  // UI
+  document.getElementById('score').textContent = score;
+  document.getElementById('coins').textContent = coins;
+}
+
+function gameOver(){
+  gameRunning = false;
+  document.getElementById('finalScore').textContent = score;
+  document.getElementById('finalCoins').textContent = coins;
+  document.getElementById('gameOver').style.display = 'flex';
+}
+
+function restartGame(){
+  gameRunning = true; gameSpeed = 3; score = 0; coins = 0; frame = 0;
+  player.x = lanes[1].center - player.width/2; player.y = lanes[1].y;
+  player.velY = 0; player.grounded = true; player.targetLane = 1; player.currentLane = 1;
+  obstacles = []; powerUps = []; document.getElementById('gameOver').style.display = 'none';
+}
+
+function loop(){ update(); render(); requestAnimationFrame(loop); }
+
+// keyboard
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space'){ e.preventDefault(); gameRunning ? player.jump() : restartGame(); }
+  if ((e.code === 'ArrowLeft' || e.code === 'ArrowUp') && gameRunning && player.targetLane > 0) { e.preventDefault(); player.targetLane--; }
+  if ((e.code === 'ArrowRight'|| e.code === 'ArrowDown') && gameRunning && player.targetLane < lanes.length-1) { e.preventDefault(); player.targetLane++; }
+});
+
+/* ----------------------- GESTURES ----------------------- */
+let model, webcam = document.getElementById('webcam');
+
+// custom swipe gestures
+const swipeLeft = new fp.GestureDescription('swipe_left');
+swipeLeft.addCurl(fp.Finger.Thumb, fp.FingerCurl.FullCurl, 1.0);
+swipeLeft.addCurl(fp.Finger.Index, fp.FingerCurl.NoCurl, 1.0);
+swipeLeft.addDirection(fp.Finger.Index, fp.FingerDirection.Left, 1.0);
+
+const swipeRight = new fp.GestureDescription('swipe_right');
+swipeRight.addCurl(fp.Finger.Thumb, fp.FingerCurl.FullCurl, 1.0);
+swipeRight.addCurl(fp.Finger.Index, fp.FingerCurl.NoCurl, 1.0);
+swipeRight.addDirection(fp.Finger.Index, fp.FingerDirection.Right, 1.0);
+
+// include all gestures in constructor (no GE.addGesture in this build)
+const GE = new fp.GestureEstimator([
+  fp.Gestures.ThumbsUpGesture,
+  fp.Gestures.VictoryGesture,
+  swipeLeft,
+  swipeRight
+]);
+
+let lastGesture = '', lastGestureTime = 0;
+function handleGesture(name){
+  const now = Date.now();
+  if (name === lastGesture && now - lastGestureTime < 800) return; // cooldown
+  lastGesture = name; lastGestureTime = now;
+  if (!gameRunning) return;
+
+  if (name === 'thumbs_up'){ player.jump(); }
+  else if (name === 'victory' || name === 'swipe_right'){ if (player.targetLane < lanes.length-1) player.targetLane++; }
+  else if (name === 'swipe_left'){ if (player.targetLane > 0) player.targetLane--; }
+}
+
+async function setupCamera(){
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  webcam.srcObject = stream;
+  await new Promise(res => webcam.onloadedmetadata = res);
+  await webcam.play();
+}
+
+async function loadHandpose(){
+  model = await handpose.load();
+}
+
+async function detectLoop(){
+  // run at ~10Hz
+  setInterval(async () => {
+    if (!model) return;
+    const preds = await model.estimateHands(webcam, true);
+    if (preds.length){
+      const est = GE.estimate(preds[0].landmarks, 7.5);
+      if (est.gestures.length){
+        const g = est.gestures.reduce((a,b)=> a.score>b.score ? a : b);
+        handleGesture(g.name);
+      }
+    }
+  }, 100);
+}
+
+/* ----------------------- STARTUP ----------------------- */
+async function startGame(){
+  // small notice for camera permissions on file://
+  if (!window.isSecureContext) {
+    document.getElementById('secureNotice').textContent =
+      'Tip: If camera fails on file://, open via http://localhost (e.g., VS Code Live Server).';
+  }
+  initBackground();
+  restartGame();
+  loop();
+
+  try {
+    await setupCamera();
+    await loadHandpose();
+    await detectLoop();
+  } catch (e){
+    console.warn('Camera/model init failed:', e);
+    // Game still playable with keyboard
+  }
+}
+startGame();
+</script>
+</body>
+</html>
