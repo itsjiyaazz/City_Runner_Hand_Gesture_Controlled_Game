@@ -22,4 +22,4 @@ Developed  a hand gesture recognization system where you can control the game wi
 Space → Jump
 ← / → → Move lanes
 
-✨ Built with ❤️ by itsjiya.zz
+# ✨ Built with ❤️ by itsjiya.zz
