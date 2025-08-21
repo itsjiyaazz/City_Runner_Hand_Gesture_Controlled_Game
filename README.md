@@ -1,5 +1,5 @@
 # 🎮 City Runner – Hand Gesture Controlled Game
-developed  a hand gesture recognization system where you can control the game with you hands -  no controllers , no keyboard!!!:) ✋🤚✌️
+Developed  a hand gesture recognization system where you can control the game with you hands -  no controllers , no keyboard!!!:) ✋🤚✌️
 # “This project is currently in the development phase, and in the coming days, I plan to further improve and refine it.”
 
 # About the Project
